@@ -1,0 +1,664 @@
+---
+title: "ST421 Project"
+author: '2003549'
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+---
+
+```{r setup and load all the required libraries, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse) # used for data science tools such as dplyr for data cleaning
+library(knitr) #used to create tables and present results
+library(kableExtra) #extra functions to create nice tables
+library(tableone) # used to create summary tables of the data set
+library(MASS) #used for misc functions
+library(survival) # used for functions to fit survival analysis models
+library(tab) #used to create summary tables for cox proportional hazards model
+library(ggsurvfit) #used to plot survival models in ggplot
+library(gtsummary) #used for neat summary tables of regression models
+library(VIM) #used for missing data analysis
+library(gridExtra) #used to print plots side by side
+library(StepReg) #used for stepwise variable selection in Cox regression
+library(missForest) #used for random forest imputation
+library(glmnet) #used to perform regularised cox regression
+library(survminer) #used to create forest plots for hazard ratios with Cox proportional hazards model
+library(misty) #used for little's test
+library(flexsurv)# used to fit AFT models
+library(party) # used to perform the conditional unbiased recursive partitioning
+library(stats) # to obtain AIC from survreg models
+```
+
+```{r Import the raw data set}
+rawBC <- read.csv("METABRIC_Clinical.csv")
+```
+
+```{r Create a subest of the data set including only the clinical variables}
+rawBC <- rawBC[,1:31]
+BC <- rawBC
+```
+
+```{r update missing values set as "" to na}
+BC <- BC %>%
+   mutate(across(where(is.character), ~na_if(., "")))
+```
+
+```{r Data Cleaning - turning variables into factor levels where required}
+#set all required variables to factor variables
+BC <- BC %>% mutate_if(is.character, as.factor)
+#binary variables must also be factor variables
+BC$chemotherapy <- as.factor(BC$chemotherapy)
+BC$cohort <- as.factor(BC$cohort)
+BC$hormone_therapy <- as.factor(BC$hormone_therapy)
+BC$integrative_cluster <- as.factor(BC$integrative_cluster)
+BC$integrative_cluster <- factor(BC$integrative_cluster, levels=c('1', '2', '3', '4ER-', '4ER+', '5', '6', '7', '8', '9', '10'))
+BC$overall_survival <- as.factor(BC$overall_survival)
+BC$radio_therapy <- as.factor(BC$radio_therapy)
+BC$tumor_stage <- as.factor(BC$tumor_stage)
+BC$death_from_cancer <- as.factor(BC$death_from_cancer)
+BC$neoplasm_histologic_grade <- as.factor(BC$neoplasm_histologic_grade)
+```
+
+```{r create summary table of amount of missing data}
+#get the number and percent of na values for each row
+NAs <- as.data.frame(colSums(is.na(BC)))
+total <- nrow(BC)
+#add the percentage
+NAs <- NAs %>%
+  mutate(percNA = round(NAs/total*100,2))
+#reorder the data set by variables with the most missing values
+NAs <- NAs[order(NAs$`colSums(is.na(BC))`, decreasing = TRUE),]
+#only include the variables which are missing values 
+NAs <- NAs[1:13,]
+#print the summary table
+kable(NAs, col.names = c("Number of NAs", "% NAs")) %>% kable_classic(latex_options = c("HOLD_position","scale_down"), full_width = F)
+```
+
+```{r Re-level some of the factor variables so they are neater}
+#set cancer type detailed
+levels(BC$cancer_type_detailed) <- list("Breast Invasive Ductal Carcinoma" = "Breast Invasive Ductal Carcinoma",
+                                        "Breast Invasive Lobular Carcinoma" = "Breast Invasive Lobular Carcinoma",
+                                        "Breast Mixed Ductal and Lobular Carcinoma" = "Breast Mixed Ductal and Lobular Carcinoma",
+                                        "Other" = c("Breast", "Breast Invasive Mixed Mucinous Carcinoma", "Metaplastic Breast Cancer"))
+
+#set her2 status measured by snp6
+levels(BC$her2_status_measured_by_snp6) <- list("GAIN" = "Gain",
+                                                "LOSS" = "LOSS",
+                                                "NEUTRAL" = "NEUTRAL")
+
+# set tumor other histologic subtype
+levels(BC$tumor_other_histologic_subtype) <- list("Ductal/NST" = "Ductal/NST",
+                                                  "Lobular" = "Lobular",
+                                                  "Mixed" = "Mixed",
+                                                  "Other" = c("Medullary", "Metaplastic", "Mucinous", "Other", "Tubular/ cribiform"))
+#set oncotree code
+levels(BC$oncotree_code) <- list("IDC" = "IDC",
+                                 "ILC" = "ILC",
+                                 "MDLC" = "MDLC",
+                                 "Other" = c("BREAST", "IMMC", "MBC"))
+```
+
+```{r Create a summary table of the data set, include = FALSE}
+#create new data set
+BCNamed <- BC
+#reanme all the variables in the data set
+BCNamed <- BCNamed %>% 
+  rename(
+    `Patient ID` = patient_id, `Age of Diagnosis` = age_at_diagnosis, `Type of Breast Surgery` = type_of_breast_surgery, `Cancer Type` = cancer_type, `Cancer Type Detailed` = cancer_type_detailed, `Cellularity` = cellularity, `Chemotherapy` = chemotherapy, `PAM50 Subtype` = pam50_._claudin.low_subtype, `Cohort` = cohort, `ER Status by IHC` = er_status_measured_by_ihc, `ER Status` = er_status, `Tumour Grade` = neoplasm_histologic_grade, `HER2 Status by SNP6` = her2_status_measured_by_snp6, `HER2 Status` = her2_status, `Tumour Histologic Subtype` = tumor_other_histologic_subtype, `Hormone Therapy` = hormone_therapy, `Menopause State` = inferred_menopausal_state, `METABRIC Cluster` = integrative_cluster, `Tumour Laterality` = primary_tumor_laterality, `Positive Lymph Nodes` = lymph_nodes_examined_positive, `Mutation Count` = mutation_count, `Nottingham Prognosis Index` = nottingham_prognostic_index, `Oncotree Code` = oncotree_code, `Length of Survival (Months)` = overall_survival_months, `Overall Survival` = overall_survival, `PR Status` = pr_status, `Radio Therapy` = radio_therapy, `Three Gene Subtype` = X3.gene_classifier_subtype, `Tumour Size` = tumor_size, `Tumour Stage` = tumor_stage, `Patient Outcome` = death_from_cancer)
+
+#create summary table - we are going to split it into two different tables 
+#create first table which is the first 17 variables
+table1 <-CreateTableOne(data=BCNamed[1:17])
+table1 <- print(table1)
+#create second table which is the last 12 variables
+table2<-CreateTableOne(data=BCNamed[18:31])
+table2 <- print(table2)
+```
+```{r Output the created summary table}
+#print summary table nicely
+table1 %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F) %>% add_indent(c(7:10, 12:14, 17:23, 25:29, 33:35, 37:39, 42:45), level_of_indent = 1) 
+
+table2 %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F) %>% add_indent(c(3:13, 19:22, 28:31, 34:38, 40:42), level_of_indent = 1) # %>% save_kable(file = "BCSummaryTableNew2.png", zoom = 1.5)
+```
+
+```{r Age of diagnosis histogram}
+#create histogram of age of diagnosis
+ggplot(BC, aes(x=age_at_diagnosis)) + 
+  geom_histogram( binwidth=2, fill="#69b3a2", color="#e9ecef", alpha=0.9) + ylim(0,150) + labs(x = "Age at Diagnosis (years)", y = "Count")+ theme(plot.title = element_text(hjust = 0.5)) 
+```
+
+```{r Histogram of length of survival in months}
+#histogram of overall survival months
+ggplot(BC, aes(x=overall_survival_months)) + 
+  geom_histogram(fill="#69b3a2", color="#e9ecef", alpha=0.9, binwidth = 12) + labs(x = "Length of Survival (Months)", y = "Count")+ theme(plot.title = element_text(hjust = 0.5)) + ylim(0,130)
+```
+
+```{r Bar plot of Patient outcome at the end of the study}
+#create bar plot of the variable death_from_cancer
+ggplot(data=na.omit(BC), aes(x=death_from_cancer)) +
+  geom_bar(width=0.7, fill="#69b3a2", color="#e9ecef") + labs(x = "Patient Outcome at the End of the Study", y = "Count")+ theme(plot.title = element_text(hjust = 0.5)) + ylim(0,500)
+```
+
+```{r Cross table of Oncotree code and Breast cancer detailed}
+#create cross table
+tab <- xtabs(~ BC$cancer_type_detailed + BC$oncotree_code)
+#print cross table
+tab %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F)%>% add_header_above(c( "Breast Cancer Detailed" = 1, "Oncotree Code" = 4)) 
+```
+
+
+```{r remove the OncoTree Code variable from the data set}
+BC <- BC[,!(names(BC) %in% c("oncotree_code"))]
+```
+
+```{r Boxplot of patient survival length when primary tumour laterality is missing or not, fig.height=6, fig.width= 6}
+#create new data frame for missing data analysis which is a subset of the original data set
+BCMissing <- BC[-c(1,11)] #remove patientID and er_statusas not relevant for missing data analysis
+
+#create the box plot
+pbox(BCMissing[, c("overall_survival_months", "primary_tumor_laterality")], sub = "White: All observations \n Blue: Not Missing Primary Tumour Laterality \n Red: Missing Primary Tumour Laterality", ylab = "Overall Survival Length (Months)")
+```
+
+```{r Perform a Littles test of MCAr to the data set}
+#perform little's test
+little_test <- na.test(BCMissing)
+#print the result of the little's test
+little_test$result %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F) 
+```
+
+```{r Perform Littles test again to see when the null hypothesis is not rejected}
+#subset the data set
+Little_test2 <- BCMissing[,!(names(BCMissing) %in% c("tumor_size", "tumor_stage", "X3.gene_classifier_subtype", "primary_tumor_laterality","neoplasm_histologic_grade","cellularity","mutation_count","tumor_other_histologic_subtype","er_status_measured_by_ihc","type_of_breast_surgery"))] 
+#perform Little's test again
+na.test(Little_test2)
+```
+
+```{r Understanding the impact of missing data in patient outcome}
+#create new variable to the data set which is the number of missing variables for each observation 
+BC$noMissing <- as.factor(rowSums(is.na(BC)))
+#re organise the levels by grouping the last few values since not many have just 3 or more only
+levels(BC$noMissing) <- list("0" = "0",
+                             "1" = "1",
+                             "2" = "2",
+                             "3+" = c("3", "4", "5", "6", "7"))
+
+#create colour palette for the plot
+cbPalette <- c("#69b3a2", "#69b3a2", "#69b3a2", "#69b3a2")
+#create box plot of survival length based on the number of missing variables 
+ggplot(data = BC, aes(x=noMissing, y=overall_survival_months, fill = noMissing)) +
+    geom_boxplot()  +
+    theme(
+      legend.position="none",
+      plot.title = element_text(size=11)
+    ) +
+    xlab("Number of Missing Variables in a Given Observation") +
+    ylab("Overall Survival Length (Months)") + 
+  scale_fill_manual(values=cbPalette)
+
+#remove this variable from the data set 
+BC = BC[,!(names(BC) %in% c("noMissing"))]
+```
+```{r Perform the random forest imputation on the vairables with missing values, eval=FALSE}
+#NOTE - this takes a lot of time - so the results of this are saved in a new data frame "BCImput.csv"
+# These results can be re done or alternativbely the imputted data set can just be read in - see next chunk
+BCImput$tumor_stage_imputed <- missForest(BCImput)$ximp$tumor_stage
+BCImput$neoplasm_histologic_grade_imputed <- missForest(BCImput)$ximp$neoplasm_histologic_grade
+BCImput$cellularity_imputed <- missForest(BCImput)$ximp$cellularity
+BCImput$mutation_count_imputed <- missForest(BCImput)$ximp$mutation_count
+BCImput$er_status_measured_by_ihc_imputed <- missForest(BCImput)$ximp$er_status_measured_by_ihc
+BCImput$type_of_breast_surgery_imputed <- missForest(BCImput)$ximp$type_of_breast_surgery
+BCImput$tumor_size_imputed <- missForest(BCImput)$ximp$tumor_size
+BCImput$cancer_type_detailed_imputed <- missForest(BCImput)$ximp$cancer_type_detailed
+BCImput$tumor_other_histologic_subtype_imputed <- missForest(BCImput)$ximp$tumor_other_histologic_subtype
+BCImput$death_from_cancer_imputed <- missForest(BCImput)$ximp$death_from_cancer
+BCImput$X3.gene_classifier_subtype_imputed <- missForest(BCImput)$ximp$X3.gene_classifier_subtype
+BCImput$primary_tumor_laterality_imputed <- missForest(BCImput)$ximp$primary_tumor_laterality
+```
+
+```{r Read in the Imputted data set and clean it}
+#instead of running the chunk above, the imputed data set can be read in
+#this is "BCImput.csv", a .csv file for which the imputation results from the chunk above were exported
+
+#read in the data set
+BCImput <- read.csv("METABRIC_Clinical_Imputed.csv")
+#remove first variable as it is not needed
+BCImput <- BCImput[,!(names(BCImput) %in% c("patient_id"))]
+#update the factor levels which are required as done previously for BC 
+BCImput <- BCImput %>% mutate_if(is.character, as.factor)
+BCImput$chemotherapy <- as.factor(BCImput$chemotherapy)
+BCImput$cohort <- as.factor(BCImput$cohort )
+BCImput$hormone_therapy <- as.factor(BCImput$hormone_therapy)
+BCImput$overall_survival <- as.factor(BCImput$overall_survival)
+BCImput$radio_therapy <- as.factor(BCImput$radio_therapy)
+#set the reference category as normal
+BCImput$pam50_._claudin.low_subtype <- relevel(BCImput$pam50_._claudin.low_subtype, ref = "Normal")
+```
+
+```{r Bar plot of tumour stage before and after imputation}
+#tumour stage before imputation
+tumor_stage1 <- ggplot(data=BCImput, aes(x=as.factor(tumor_stage))) +
+  geom_bar(width=0.7, fill="#69b3a2", color="#e9ecef") + labs(x = "Tumor Stage", y = "Count")+ theme(plot.title = element_text(hjust = 0.5)) + ggtitle("Before Imputation") +
+  geom_text(aes(label = ..count..), stat = "count", vjust = 1.5, colour = "darkred")
+
+#tumour stage after imputation
+tumor_stage2 <- ggplot(data=BCImput, aes(x=tumor_stage_imputed)) +
+  geom_bar(width=0.7, fill="#69b3a2", color="#e9ecef") + labs(x = "Tumor Stage", y = "Count")+ theme(plot.title = element_text(hjust = 0.5)) + ggtitle("After Imputation") +
+  geom_text(aes(label = ..count..), stat = "count", vjust = 1.5, colour = "darkred")
+
+#plot both side by side
+grid.arrange(tumor_stage1, tumor_stage2, ncol=2)
+```
+
+```{r Histogram of mutation count before and after imputation, fig.width=8}
+#mutation count before imputation
+mutation_count1 <- ggplot(data=BCImput, aes(x=mutation_count)) +
+  geom_histogram(width=1, fill="#69b3a2", color="#e9ecef") + labs(x = "Mutation Count", y = "Count")+ ggtitle("Before Imputation")+ theme(plot.title = element_text(hjust = 0.5))
+
+#mutation count after imputation
+mutation_count2 <- ggplot(data=BCImput, aes(x=mutation_count_imputed)) +
+  geom_histogram(width=0.7, fill="#69b3a2", color="#e9ecef") + labs(x = "Mutation Count", y = "Count")+ ggtitle("After Imputation")+ theme(plot.title = element_text(hjust = 0.5))
+
+#plot both side by side
+grid.arrange(mutation_count1, mutation_count2, ncol=2)
+```
+```{r Remove the imputed variables and replace the original values with these}
+#replace the variables with missing values with the imputed values
+BCImput$tumor_stage <- BCImput$tumor_stage_imputed
+BCImput$X3.gene_classifier_subtype <- BCImput$X3.gene_classifier_subtype_imputed
+BCImput$primary_tumor_laterality <- BCImput$primary_tumor_laterality_imputed
+BCImput$neoplasm_histologic_grade <- round(BCImput$neoplasm_histologic_grade_imputed)
+BCImput$cellularity <- BCImput$cellularity_imputed
+BCImput$mutation_count <- BCImput$mutation_count_imputed
+BCImput$er_status_measured_by_ihc <- BCImput$er_status_measured_by_ihc_imputed
+BCImput$type_of_breast_surgery <- BCImput$type_of_breast_surgery_imputed
+BCImput$tumor_size <- BCImput$tumor_size_imputed
+BCImput$cancer_type_detailed <- BCImput$cancer_type_detailed_imputed
+BCImput$tumor_other_histologic_subtype <- BCImput$tumor_other_histologic_subtype_imputed
+BCImput$death_from_cancer <- BCImput$death_from_cancer_imputed
+
+#remove the imputted variables as no longer needed
+BCImput <- BCImput[-c(31:42)]
+```
+
+```{r Create the first survival object}
+#select subset of variables for Kaplan Meier plot
+BCsurvival <- BC[,(names(BC) %in% c("patient_id", "overall_survival_months", "overall_survival", "death_from_cancer"))]
+#create new column for censored column
+BCsurvival['censored'] <- BCsurvival['overall_survival']
+
+#create the censored column appropriately depending on whether the patient died from breast cancer or not
+BCsurvival <- within(BCsurvival, censored[death_from_cancer == 'Living'] <- 0)
+BCsurvival <- within(BCsurvival, censored[death_from_cancer == 'Died of Other Causes'] <- 0)
+BCsurvival <- within(BCsurvival, censored[death_from_cancer == 'Died of Disease'] <- 1)
+
+#needs to be a numeric value
+BCsurvival$censored <- as.numeric(BCsurvival$censored)
+
+#create survival object
+s1 <- Surv(BCsurvival$overall_survival_months, BCsurvival$censored)
+```
+
+```{r Kaplan Meier Plot for the entire data set}
+#create Kaplan Meier plot
+survfit2(s1 ~ 1, data = BCsurvival) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Length of Time (Months)",
+    y = "Overall survival probability",
+  ) + 
+  add_confidence_interval() +
+  add_risktable() + ggtitle("Kaplan-Meier Curve of the METABRIC Data Set")
+
+#Calculate the 5-year survival time 
+summary(survfit(s1 ~ 1, data = BCImput), times = 60)
+
+#calculate the median survival time and 95\% CI
+survfit(s1 ~ 1, data = BCsurvival) %>% 
+  tbl_survfit(
+    probs = 0.5,
+    label_header = "**Median survival (95% CI)**"
+  )
+```
+
+```{r Kaplan Meier Plot Stratifying by ER status and PR status, fig.width=8}
+#create Kaplan Meier plot stratifying by PR status
+p1 <- survfit2(s1 ~ pr_status, data = BCImput) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Length of Time (Months)",
+    y = "Overall survival probability",
+  )  + add_confidence_interval() + ggtitle("Progesterone Receptor Status") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#create Kaplan Meier plot stratifying by ER status
+p2 <- survfit2(s1 ~ er_status, data = BCImput) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Length of Time (Months)",
+    y = "Overall survival probability",
+  )  + add_confidence_interval() + ggtitle("Oestrogen Receptor Status") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+#print both plots side by side
+grid.arrange(p1, p2, ncol= 2)
+```
+
+```{r Calculate metric for ER status}
+#calculate median survival time
+survfit(s1 ~ er_status, data = BCImput) %>% 
+  tbl_survfit(
+    probs = 0.5,
+    label_header = "**Median survival (95% CI)**"
+  )
+
+#perform log rank test
+survdiff(s1 ~ er_status, data = BCImput)
+
+#calculate 5-year survival time between groups
+summary(survfit(s1 ~ er_status, data = BCImput), times = 60)
+```
+
+```{r  Calculate metric for PR status}
+#calculate median survival time
+survfit(s1 ~ pr_status, data = BCImput) %>% 
+  tbl_survfit(
+    probs = 0.5,
+    label_header = "**Median survival (95% CI)**"
+  )
+
+#perform log rank test
+survdiff(s1 ~ pr_status, data = BCImput)
+```
+
+```{r Kaplan Meier Plot Stratifying by HER2 status}
+#create Kaplan Meier plot
+survfit2(s1 ~ her2_status, data = BCImput) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Length of Time (Months)",
+    y = "Overall survival probability",
+  ) + 
+  add_confidence_interval() + ggtitle("Kaplan-Meier Curve of the METABRIC Data Set stratified by her2 status")
+
+#calculate median survival time
+survfit(s1 ~ her2_status, data = BCImput) %>% 
+  tbl_survfit(
+    probs = 0.5,
+    label_header = "**Median survival (95% CI)**"
+  )
+
+#perform log rank test
+survdiff(s1 ~ her2_status, data = BCImput)
+```
+
+```{r Kaplan Meier Plot Stratifying by whether the patient had chemotherapy}
+#create Kaplan Meier plot
+survfit2(s1 ~ chemotherapy, data = BCImput) %>% 
+  ggsurvfit() +
+  labs(
+    x = "Months",
+    y = "Overall survival probability",
+  )+ add_confidence_interval() + ggtitle("Kaplan-Meier Curve of the METABRIC Data Set stratified by chemotherapy")
+```
+
+```{r Cox Proportional Hazards using backward variable selection}
+#create new column for whether the patient is censored or not
+BCImput['censored'] <- BCImput['overall_survival']
+
+#create the censored column appropriately depending on whether the patient died from breast cancer or not
+BCImput <- within(BCImput, censored[death_from_cancer == 'Living'] <- 0)
+BCImput <- within(BCImput, censored[death_from_cancer == 'Died of Other Causes'] <- 0)
+BCImput <- within(BCImput, censored[death_from_cancer == 'Died of Disease'] <- 1)
+#variable must be numeric
+BCImput$censored <- as.numeric(BCImput$censored)
+
+#remove redundant variables
+BCcox <- BCImput[,!(names(BCImput) %in% c("X","death_from_cancer", "overall_survival", "cancer_type", "er_status_measured_by_ihc", "cohort","integrative_cluster", "nottingham_prognostic_index", "her2_status_measured_by_snp6"))]
+
+#one observation has a survival length of 0 - this must be removed 
+BCcox <- BCcox[BCcox$overall_survival_months != 0,]
+
+#create survival formula
+formula <- Surv(overall_survival_months, censored) ~ .
+
+#perform backwards stepwise variable selection
+cox_backward_imputed <- stepwiseCox(formula, data = BCcox, selection="backward", select="AIC")
+
+#print the variables so we know what they are
+cox_backward_imputed[["Coefficients of the Selected Variables"]] %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F)
+```
+
+```{r Print results from backwards variable selection , fig.height=7, fig.width=8}
+#fit model using the variables taken from the backwards approach (chunk before this one)
+cox_formula_backwards <- Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + pam50_._claudin.low_subtype + neoplasm_histologic_grade + inferred_menopausal_state + lymph_nodes_examined_positive  + pr_status + radio_therapy + X3.gene_classifier_subtype +tumor_size + tumor_stage
+
+#fit cox model
+cox_backwards <- coxph(cox_formula_backwards, data = BCcox)
+
+#create summary table of the results 
+tabcoxph(cox_backwards) %>% kable_classic(latex_options = c("HOLD_position","scale_down"), full_width = F)
+
+#create forest plot of the results
+ggforest(cox_backwards, data = BCcox, main = "Hazard Ratios", cpositions = c(0.00, 0.25, 0.44))
+```
+
+```{r Perform Regularised Cox Regression - Set up}
+#create subset of data set removing the redundant variables
+x <- BCImput[,!(names(BCImput) %in% c("X","death_from_cancer", "overall_survival_months", "overall_survival", "cancer_type", "er_status_measured_by_ihc", "cohort","integrative_cluster", "censored", "nottingham_prognostic_index", "her2_status_measured_by_snp6"))]
+#there is one row (row 171) with survival time 0, so we omit that from the following 
+x <- x[-171,]
+
+#create the model for the response
+y1 <- data.frame(time = BCImput$overall_survival_months, status = BCImput$censored)
+#ensure the data frame is in the right format
+x <- data.matrix(x, rownames.force = NA)
+#there is one row (row 171) with survival time 0, so we omit that from the following 
+y1 <- data.matrix(y1[-171,])
+
+#fit the regularised model
+fit <- glmnet(x, y1, family = "cox")
+#plot the coefficients over different L1 norms
+plot(fit)
+```
+
+```{r Perform Cross Validation}
+#set the seed for reproducibility
+set.seed(1)
+
+#perform cross validation using C-Harrell Index
+cvfit <- cv.glmnet(x, y1, family = "cox", type.measure = "C")
+# plot CV results
+plot(cvfit)
+
+#save the optimal values 
+lambda.min <- cvfit$lambda.min
+lambda.1se <- cvfit$lambda.1se
+```
+
+```{r Present output of the Regularised Cox PH}
+#using the lambda which minimises the CV error
+out <- coef(fit, s = lambda.min)
+#print the output
+out  
+```
+
+```{r Table of results must be hard coded - using the chunk above}
+#create  vector of variable names
+variables <- c("age_at_diagnosis", "type_of_breast_surgery", "Breast Conserving - (Ref)", "Mastectomy", "chemotherapy", "0 - (Ref)", "1", "neoplasm_histologic_grade", "her2_status",  "Negative - (Ref)", "Positive", "hormone_therapy", "0 - (Ref)", "1",  "inferred_menopausal_state",  "Post - (Ref)", "Pre", "primary_tumor_laterality",  "Left - (Ref)", "Right", "lymph_nodes_examined_positive", "pr_status"  ,"Negative - (Ref)", "Positive", "radio_therapy", "0 - (Ref)", "1", "tumor_size", "tumor_stage")
+
+#create vector of log of the hazard ratios
+loghr <- c("0.007", " ", "-", "0.094", " ", "-", "0.175","0.252"," ", "-", "0.485"," ", "-", "-0.022"," ", "-", "0.072"," ", "-", "-0.045", "0.051", " ", "-", "-0.131"," ", "-", "-0.116", "0.005", "0.397")
+
+#create vector of hazard ratios
+hr <- c("1.01", " ", "-", "1.10", " ", "-", "1.19","1.29"," ", "-", "1.62"," ", "-", "0.98"," ", "-", "1.07"," ", "-", "0.96", "1.05", " ", "-", "0.88"," ", "-", "0.89", "1.01", "1.49")
+
+#turn it into a data frame
+out <- data.frame(Variables = variables, "Log(HR)" = loghr, "HR" = hr)
+
+#create nice outputted table
+kable(out, linesep = "\\addlinespace") %>% kable_classic(latex_options = c("HOLD_position","scale_down"), full_width = F) %>% add_indent(c(3,4,6,7,10,11,13,14,16,17,19,20,23,24,26,27), level_of_indent = 1) 
+```
+
+```{r Combining the variable selection approaches,  fig.width = 7, fig.height= 6}
+#create the model
+coxformula_m3 <- Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade + her2_status + inferred_menopausal_state + lymph_nodes_examined_positive  + pr_status + radio_therapy + tumor_size + tumor_stage
+
+#fit the cox model
+cox_m3 <- coxph(coxformula_m3, data = BCcox)
+
+#print forest plot of the model
+ggforest(cox_m3, data = BCcox,
+  cpositions = c(0.02, 0.30, 0.42), main = "Hazard Ratios")
+```
+
+```{r Now include interation terms in the model, fig.width = 7, fig.height= 6}
+#create the model - note the new interation terms
+coxformula_mint <- Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive  + pr_status + radio_therapy + tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage
+
+#fit them cox model
+cox_mint <- coxph(coxformula_mint, data = BCcox)
+
+#create the summary table
+tbl_regression(cox_mint, exponentiate = TRUE) -> newCoxSummary
+#print the summary table
+newCoxSummary
+```
+
+
+```{r Print the results of ANOVA test }
+#testing to see whether adding the interaction terms improves the model
+kable(round(anova(cox_m3, cox_mint, test = "Chisq"), 3))%>% kable_classic(latex_options = c("HOLD_position","scale_down"), full_width = F) 
+```
+
+```{r Testing the Proportional Hazards assumption for M_int}
+#create the cox model
+cox_fit <- coxph(coxformula_mint, data = BCcox)
+#perform the PH assumption test
+cz <- cox.zph(cox_fit)
+#print results of the hypothesis test
+round(cz$table,3) %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F) 
+
+#make the plots side by side and adjsut margins of the plot
+par(mfrow = c(1, 2), mar = c(3.9, 4.1, 2.1, 1.2))
+
+#print the schodenfield residuals for age of diagnosis
+plot(cz, var= 1, col = "darkblue", lwd = 2.5, main = "Age At Diagnosis" , ylab = "Schoenfield Residual", xlab = "Time (Months)")
+abline(h=0,col="red", lwd = 2)
+
+#print the schodenfield residuals for ER status
+plot(cz, var= 3, col = "darkblue", lwd = 2.5, main = "Oestrogen Receptor Status", ylab = "Schoenfield Residual", xlab = "Time (Months)")
+abline(h=0,col="red", lwd = 2) 
+```
+
+```{r Adding startification to the Cox proportional hazards model , fig.width = 7, fig.height= 6}
+#create the cox model - note the strata() in chemotherapy
+coxformula_strata <- Surv(overall_survival_months, censored) ~ age_at_diagnosis + strata(chemotherapy) + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive  + pr_status + radio_therapy + tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage
+
+#fit the stratified cox model
+cox_strata <- coxph(coxformula_strata, data = BCcox)
+
+#create a summary table of the results
+tbl_regression(cox_strata, exponentiate = TRUE) -> strataCoxSummary 
+#print the summary table
+strataCoxSummary
+```
+
+```{r Check the PH assumption again after stratification}
+#perform the test of the PH assumption
+cz <- cox.zph(cox_strata)
+#print the results of the hypothesis test
+round(cz$table,3) %>% kbl() %>% kable_classic(latex_options = c("HOLD_position"), full_width = F)  
+```
+
+```{r Create AFT models - First the Weibull AFT}
+#copy over the data frame
+BCAFT <- BCcox
+
+#fit the AFT model using the same variables from the Cox PH model
+aft.weibull <- survreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "weibull")
+```
+
+```{r Fitting the exponential AFT 1}
+#fit the AFT model using the same variables from the Cox PH model
+aft.exponential <- survreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "exponential")
+
+#create a summary table of the coefficients 
+tbl_regression(aft.exponential) -> aft.exponential.table
+#create another summary table with the coefficients exponentiated - these are the Acceleration Factors
+tbl_regression(aft.exponential, exponentiate = TRUE, tidy_fun = function(x, ...) broom::tidy(x, ...) %>% dplyr::filter(.data$term !=
+    "Log(scale)")%>% mutate(across(all_of(c("estimate", "conf.low", "conf.high")), ~exp(.))))  -> aft.exponential.table.exp
+
+#print the summary tables 
+aft.exponential.table
+aft.exponential.table.exp
+```
+
+```{r  Fitting the Log Logistic AFT}
+#fit the AFT model using the same variables from the Cox PH model
+aft.loglogistic <- survreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "loglogistic")
+```
+
+```{r Fitting the LogNormal AFT}
+#fit the AFT model using the same variables from the Cox PH model
+aft.lognormal<- survreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "lognormal")
+
+#create a summary table of the coefficients 
+tbl_regression(aft.lognormal)  -> aft.lognormal.table.log
+
+#create another summary table with the coefficients exponentiated - these are the Acceleration Factors
+tbl_regression(aft.lognormal, exponentiate = TRUE, tidy_fun = function(x, ...) broom::tidy(x, ...) %>% dplyr::filter(.data$term !=
+    "Log(scale)")%>% mutate(across(all_of(c("estimate", "conf.low", "conf.high")), ~exp(.))))  -> aft.lognormal.table
+aft.lognormal.table
+
+#print the summary tables 
+aft.lognormal.table.log
+aft.lognormal.table
+```
+
+
+```{r Create summary table of different AFT models and AIC values}
+#get the log likelihood values of each model
+LLs <- c(round(aft.weibull[["loglik"]][1],1), round(aft.exponential[["loglik"]][1],1), round(aft.loglogistic[["loglik"]][1],1), round(aft.lognormal[["loglik"]][1],1))
+
+#get teh AIC value of each model
+AICs <- c(round(extractAIC(aft.weibull)[2],1), round(extractAIC(aft.exponential)[2],1), round(extractAIC(aft.loglogistic)[2],1), round(extractAIC(aft.lognormal)[2],1))
+
+#create vector of distribtuion names
+Dists <- c("Weibull", "Exponential", "Log Logistic", "Log Normal")
+
+#create a datra from from these vectors to print the results 
+AICtable = data.frame("Distribution" = Dists, "Log Likelihood" = LLs, "AIC" = AICs)
+#print the table
+kable(AICtable) %>% kable_classic(latex_options = c("HOLD_position","scale_down"), full_width = F)
+```
+
+```{r Create plot of each AFT model against the Kaplan Meier Curve, fig.height=4, fig.width=5}
+#Fit the Weibull AFT model - using the flexsurvreg function this time
+aft.weibull.2 <- flexsurvreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "weibull")
+
+#Fit the Exponential AFT model - using the flexsurvreg function this time
+aft.exponential.2 <- flexsurvreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "exponential")
+
+#Fit the Log logistic AFT model - using the flexsurvreg function this time
+aft.loglogistic.2 <- flexsurvreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status  + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "llogis")
+
+#Fit the Log normal AFT model - using the flexsurvreg function this time
+aft.lognormal.2 <- flexsurvreg(formula = Surv(overall_survival_months, censored) ~ age_at_diagnosis + chemotherapy + er_status + neoplasm_histologic_grade +her2_status + inferred_menopausal_state + lymph_nodes_examined_positive + pr_status + radio_therapy  +tumor_size + tumor_stage + age_at_diagnosis:inferred_menopausal_state + tumor_size:tumor_stage, data = BCAFT, dist = "lognormal")
+
+#create a plot of the weibull AFT over the Kaplan Meier Curve
+plot(aft.weibull.2, col = "red", ci=FALSE, lwd.obs=1.5, lwd = 2, xlab = "Length of Time (Months)", ylab = "Survival Probability", lty = 2)
+#add the Exponential AFT model
+lines(aft.exponential.2, col="blue", ci=FALSE, lwd = 2, lty = 3)
+#add the Log logistic AFT model
+lines(aft.loglogistic.2, col="darkgreen", ci=FALSE, lwd = 2, lty = 4)
+#add the  Log logistic AFT model 
+lines(aft.lognormal.2, col="orange", ci=FALSE, lwd = 2, lty = 6)
+#add the legend to the plot
+legend("bottomleft",legend=c("Kaplan Meier","Exponential","Weibull", "Log logistic", "Log Normal"),lty=c(1, 3,2,4,5),col=c(1,"blue","red", "darkgreen", "orange"), cex = 0.7, lwd = 2)
+```
+
+```{r Create decision tree from recursive partitioning, fig.width = 16, fig.height= 7}
+#plot the conditional tree 
+plot(ctree(Surv(overall_survival_months, censored) ~ ., data = BCcox))
+```
